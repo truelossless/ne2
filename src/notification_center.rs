@@ -75,7 +75,7 @@ impl NotificationCenterState {
 
     /// Adds a simple notification with the provided id.
     pub fn add_text_notification_with_id(&mut self, id: Option<&'static str>, text: &str) {
-        if id.is_some() {
+        if id.is_none() {
             self.id = self.id.overflowing_add(1).0;
         }
 
@@ -117,7 +117,7 @@ impl NotificationCenterState {
         button_text: &str,
         callback: Callback,
     ) {
-        if id.is_some() {
+        if id.is_none() {
             self.id = self.id.overflowing_add(1).0;
         }
 

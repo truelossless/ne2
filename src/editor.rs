@@ -305,8 +305,6 @@ impl EditorState {
         }
     }
 
-    /// Updates the cursor size.
-
     /// Updates the number of lines displayed in the text view.
     #[inline]
     pub fn update_lines_displayed(&self, height: f64, line_height: f64) {
@@ -342,7 +340,7 @@ impl EditorState {
         self.delta = DeltaState::new(delta, engine.get_head_rev_id());
     }
 
-    /// Gets the x offset of the cursor
+    /// Gets the x offset of the cursor.
     pub fn cursor_x_offset(&self) -> usize {
         let buffer = self.buffer();
         let line_offset = buffer.offset_of_line(self.cursor.y);
@@ -456,15 +454,9 @@ impl EditorState {
 
     /// Deletes the line ending of the specified line.
     pub fn delete_line_ending(&mut self, line_idx: usize) {
-        let line_offset = self.buffer().offset_of_line(line_idx);
-        let line = self
-            .buffer()
-            .lines_raw(line_offset..)
-            .next()
-            .unwrap()
-            .to_string();
-
-        let line_len = line.len();
+        let buffer = self.buffer();
+        let line_offset = buffer.offset_of_line(line_idx);
+        let line = buffer.lines_raw(line_offset..).next().unwrap();
 
         let line_ending_len = if line.ends_with("\r\n") {
             2
@@ -474,8 +466,8 @@ impl EditorState {
             0
         };
 
-        let char_offset = self.buffer().offset_of_line(line_idx) + line_len - line_ending_len;
-        self.remove(char_offset..char_offset + line_ending_len);
+        let byte_offset = self.buffer().offset_of_line(line_idx) + line.len() - line_ending_len;
+        self.remove(byte_offset..byte_offset + line_ending_len);
     }
 
     /// Gets the last grapheme for the line.
@@ -521,6 +513,14 @@ impl EditorState {
     pub fn cursor_to_line(&mut self, line_idx: usize) {
         self.cursor.y = line_idx;
         self.cursor_to_sol();
+    }
+
+    /// Inserts a newline at the cursor position and matches the indentation level.
+    pub fn cursor_to_newline(&mut self) {
+        let indent = self.insert_newline(self.cursor_offset());
+        self.cursor.y += 1;
+        self.cursor.x = Some(indent);
+        self.cursor.wanted_x = indent;
     }
 
     /// Moves the cursor to the specified byte offset.
@@ -590,26 +590,18 @@ impl EditorState {
         self.cursor.x = Some(x);
     }
 
-    /// Inserts a newline at the cursor position and match the identation level.
+    /// Inserts a newline at the specified byte offset and matches the identation level
+    /// of the current line.
     /// This respects the line ending of the current file.
-    pub fn insert_newline(&mut self) {
-        let offset = self.cursor_offset();
+    pub fn insert_newline(&mut self, byte_offset: usize) -> usize {
         let buffer = self.buffer();
         let indent = self.whitespace(buffer.offset_of_line(self.cursor.y));
         self.edit(
-            offset..offset,
+            byte_offset..byte_offset,
             &format!("{}{}", self.line_ending.to_chars(), indent),
         );
-        self.cursor.y += 1;
 
-        // The line may be empty, cursor_to_sol() will take care
-        // of setting x to None it this is the case.
-        if indent.is_empty() {
-            self.cursor_to_sol();
-        } else {
-            self.cursor.x = Some(indent.len());
-            self.cursor.wanted_x = indent.len();
-        }
+        indent.len()
     }
 
     /// Removes whitespace characters (space or tab) at the cursor position.
@@ -652,12 +644,16 @@ impl EditorState {
 
     /// Saves the buffer to the current file.
     pub fn save_to_file(&mut self) {
+        let file = match &self.file {
+            Some(file) => file,
+            None => {
+                return;
+            }
+        };
+
         let buffer = self.buffer();
-        fs::write(
-            self.file.as_ref().unwrap().as_os_str(),
-            buffer.slice_to_cow(..).as_bytes(),
-        )
-        .expect("Could not write file to disk!");
+        fs::write(file.as_os_str(), buffer.slice_to_cow(..).as_bytes())
+            .expect("Could not write file to disk!");
     }
 }
 
@@ -850,9 +846,6 @@ impl Ne2Editor {
 
                 // the last line is going to be empty
                 for (style, text_range) in ranges {
-                    // while the syntax highlighting is updating, this will return wrong ranges.
-                    // in particular, the range may index out of the str. This fixes this issue.
-
                     let text_range = text_range.start + offset..text_range.end + offset;
 
                     if style.font_style.contains(FontStyle::BOLD) {

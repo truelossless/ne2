@@ -5,4 +5,4 @@ It is specifically designed to be performant and handles very well large text fi
 
 ![preview](https://i.imgur.com/9wv3pbx.png)
 
-All the icons are from [Flaticon](https://www.flaticon.com/uicons">Flaticon).
+All the icons are from [Flaticon](https://www.flaticon.com/uicons).

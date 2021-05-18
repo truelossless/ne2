@@ -1,13 +1,14 @@
 //! Vim-like motions.
 
 use crate::{
+    app::SAVE_FILE_AS_AND_EXIT,
     editor::{CursorMode, Direction, EditorState, OPEN_DIRECTORY},
     utils::ActionKey,
 };
 use druid::{
     commands::{SHOW_OPEN_PANEL, SHOW_SAVE_PANEL},
     keyboard_types::Key,
-    Data, EventCtx, FileDialogOptions, Modifiers,
+    Application, Data, EventCtx, FileDialogOptions, Modifiers,
 };
 use std::{char, sync::Arc};
 
@@ -226,7 +227,7 @@ pub enum VimActionKind {
     /// Opens a line after the current line.
     AppendLine,
     /// Opens a line before the current line.
-    InsertLine,
+    PrependLine,
     /// Changes text.
     Change,
     /// Deletes text.
@@ -250,7 +251,7 @@ impl VimActionKind {
             'i' => VimActionKind::Insert,
             'a' => VimActionKind::Append,
             'o' => VimActionKind::AppendLine,
-            'O' => VimActionKind::InsertLine,
+            'O' => VimActionKind::PrependLine,
             'd' => VimActionKind::Delete,
             'c' => VimActionKind::Change,
             'w' => VimActionKind::Move(VimMotionKind::WordStartForwards),
@@ -273,7 +274,7 @@ impl VimActionKind {
         matches!(
             &self,
             VimActionKind::AppendLine
-                | VimActionKind::InsertLine
+                | VimActionKind::PrependLine
                 | VimActionKind::Insert
                 | VimActionKind::Append
                 | VimActionKind::Repeat
@@ -345,6 +346,10 @@ pub enum VimCommandKind {
     GotoLine(usize),
     /// Save the current buffer.
     Save,
+    /// Save the current buffer and quits ne2.
+    SaveAndQuit,
+    /// Quit ne2.
+    Quit,
 }
 
 #[derive(Clone, Data, Default)]
@@ -407,14 +412,11 @@ impl VimCommand {
                     return VimCommandKind::None;
                 }
 
-                let next_char = match char_iter.nth(numbers.len()) {
-                    Some(next_char) => next_char,
-                    None => return VimCommandKind::None,
-                };
-
-                match next_char {
-                    'w' => VimCommandKind::Save,
-                    _ => todo!(),
+                match &self.chars[1..] {
+                    "w" => VimCommandKind::Save,
+                    "wq" => VimCommandKind::SaveAndQuit,
+                    "q" => VimCommandKind::Quit,
+                    _ => VimCommandKind::None,
                 }
             }
             _ => unreachable!(),
@@ -466,7 +468,7 @@ impl VimState {
                     // replace correctly the cursor
                     VimMotionKind::Line => {
                         editor.cursor_to_sol();
-                        editor.insert_newline();
+                        editor.cursor_to_newline();
                         editor.move_cursor(Direction::Up);
                     }
                     _ => (),
@@ -528,6 +530,22 @@ impl VimState {
                 }
             }
 
+            VimActionKind::PrependLine | VimActionKind::AppendLine => {
+                let line_offset;
+
+                if self.action.kind == VimActionKind::PrependLine {
+                    line_offset = editor.buffer().offset_of_line(editor.cursor.y);
+                } else {
+                    line_offset = editor.buffer().offset_of_line(editor.cursor.y + 1);
+                    editor.cursor.y += 1;
+                }
+
+                let indent = editor.insert_newline(line_offset);
+                editor.cursor.x = Some(indent);
+                editor.cursor.wanted_x = indent;
+                self.insert_mode(editor);
+            }
+
             VimActionKind::Repeat => {
                 self.action = std::mem::take(&mut self.last_action);
                 self.exec_action(editor);
@@ -538,10 +556,30 @@ impl VimState {
     }
 
     /// Executes the current command.
-    pub fn exec_command(&mut self, editor: &mut EditorState) {
+    pub fn exec_command(&mut self, editor: &mut EditorState, ctx: &mut EventCtx) {
         match &self.command.as_mut().unwrap().get() {
             VimCommandKind::GotoLine(l) => editor.cursor_to_line(*l - 1),
-            VimCommandKind::Save => editor.save_to_file(),
+            VimCommandKind::Save => {
+                if editor.file.is_some() {
+                    editor.save_to_file();
+                } else {
+                    ctx.submit_command(SHOW_SAVE_PANEL.with(FileDialogOptions::new()));
+                }
+            }
+            VimCommandKind::SaveAndQuit => {
+                if editor.file.is_some() {
+                    editor.save_to_file();
+                    Application::global().quit();
+                } else {
+                    ctx.submit_command(
+                        SHOW_SAVE_PANEL
+                            .with(FileDialogOptions::new().accept_command(SAVE_FILE_AS_AND_EXIT)),
+                    );
+                }
+            }
+            VimCommandKind::Quit => {
+                Application::global().quit();
+            }
             VimCommandKind::None => (),
         }
 
@@ -616,7 +654,7 @@ impl VimState {
 
             // executing the command
             Key::Enter if !mods.action_key() && self.command.is_some() => {
-                self.exec_command(editor);
+                self.exec_command(editor, ctx);
             }
 
             // vim action in normal mode
@@ -659,7 +697,7 @@ impl VimState {
 
             // going to the next line
             Key::Enter if !mods.action_key() && self.mode == EditMode::Insert => {
-                editor.insert_newline();
+                editor.cursor_to_newline();
             }
 
             // deleting a character

@@ -18,7 +18,8 @@ use crate::{
 use druid::{
     commands::{OPEN_FILE, SAVE_FILE_AS},
     widget::{CrossAxisAlignment, Flex, Split},
-    AppDelegate, Data, ExtEventSink, Handled, Lens, Widget, WidgetExt,
+    AppDelegate, Application, Data, ExtEventSink, FileInfo, Handled, Lens, Selector, Widget,
+    WidgetExt,
 };
 use once_cell::sync::OnceCell;
 
@@ -27,6 +28,9 @@ use once_cell::sync::OnceCell;
 /// to register it as a global variable and define it at the
 /// start of the application.
 pub static SINK: OnceCell<ExtEventSink> = OnceCell::new();
+
+/// Command to exit just after saving the file.
+pub const SAVE_FILE_AS_AND_EXIT: Selector<FileInfo> = Selector::new("ne2.save_as_and_exit");
 
 /// The whole application state
 #[derive(Clone, Data, Lens)]
@@ -126,6 +130,13 @@ impl AppDelegate<AppState> for Delegate {
             data.editor.file = Some(Arc::new(path.path().to_owned()));
             data.editor.save_to_file();
             data.editor.update_language();
+            return Handled::Yes;
+        }
+
+        if let Some(path) = cmd.get(SAVE_FILE_AS_AND_EXIT) {
+            data.editor.file = Some(Arc::new(path.path().to_owned()));
+            data.editor.save_to_file();
+            Application::global().quit();
             return Handled::Yes;
         }
 
