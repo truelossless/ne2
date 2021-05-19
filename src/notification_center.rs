@@ -212,45 +212,42 @@ impl<W: Widget<AppState>> Controller<AppState, W> for NotificationCenterControll
         data: &mut AppState,
         env: &druid::Env,
     ) {
-        match event {
-            Event::Command(cmd) => {
-                if let Some((id, text)) = cmd.get(ADD_TEXT_NOTIFICATION) {
-                    data.notification_center
-                        .add_text_notification_with_id(*id, text);
-                    return;
-                }
-
-                if let Some((id, text, button_text, callback)) = cmd.get(ADD_BUTTON_NOTIFICATION) {
-                    data.notification_center.add_button_notification_with_id(
-                        *id,
-                        text,
-                        button_text,
-                        callback.clone(),
-                    );
-                    return;
-                }
-
-                if let Some((id, progress)) = cmd.get(UPDATE_PROGRESS_BAR) {
-                    if let Some(notif) = data
-                        .notification_center
-                        .get_notification(&NotificationId::String(id))
-                    {
-                        notif.progress_bar = Some(*progress);
-                    }
-                    return;
-                }
-
-                if let Some((id, text)) = cmd.get(UPDATE_TEXT) {
-                    if let Some(notif) = data
-                        .notification_center
-                        .get_notification(&NotificationId::String(id))
-                    {
-                        notif.text = text.clone();
-                    }
-                    return;
-                }
+        if let Event::Command(cmd) = event {
+            if let Some((id, text)) = cmd.get(ADD_TEXT_NOTIFICATION) {
+                data.notification_center
+                    .add_text_notification_with_id(*id, text);
+                return;
             }
-            _ => (),
+
+            if let Some((id, text, button_text, callback)) = cmd.get(ADD_BUTTON_NOTIFICATION) {
+                data.notification_center.add_button_notification_with_id(
+                    *id,
+                    text,
+                    button_text,
+                    callback.clone(),
+                );
+                return;
+            }
+
+            if let Some((id, progress)) = cmd.get(UPDATE_PROGRESS_BAR) {
+                if let Some(notif) = data
+                    .notification_center
+                    .get_notification(&NotificationId::String(id))
+                {
+                    notif.progress_bar = Some(*progress);
+                }
+                return;
+            }
+
+            if let Some((id, text)) = cmd.get(UPDATE_TEXT) {
+                if let Some(notif) = data
+                    .notification_center
+                    .get_notification(&NotificationId::String(id))
+                {
+                    notif.text = text.clone();
+                }
+                return;
+            }
         }
         child.event(ctx, event, data, env)
     }

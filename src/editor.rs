@@ -61,6 +61,8 @@ pub struct EditorState {
     pub delta: DeltaState,
     /// The line ending style of the current file.
     pub line_ending: LineEnding,
+    /// The indentation style of the current file.
+    pub indent_style: IndentStyle,
     /// The programming language of the current file.
     pub language: String,
     /// The path of the file being edited. None if the file hasn't been saved to the disk yet.
@@ -68,6 +70,36 @@ pub struct EditorState {
     /// The attached LSP server if there is one.
     #[data(ignore)]
     pub lsp: Option<Arc<Mutex<LspServer>>>,
+}
+
+/// An indenting style.
+#[derive(Clone, Data, PartialEq)]
+pub enum IndentStyle {
+    /// Using tabs to indent code.
+    Tabs(u8),
+    /// Using spaces to indent code.
+    Spaces(u8),
+}
+
+impl IndentStyle {
+    /// Gets the indentation corresponding to this style.
+    pub fn get(&self) -> String {
+        match self {
+            IndentStyle::Spaces(spaces) => " ".repeat(*spaces  as usize),
+            IndentStyle::Tabs(tabs) => "\t".repeat(*tabs as usize),
+        }
+    }
+}
+
+impl ToString for IndentStyle {
+    fn to_string(&self) -> String {
+        match self {
+            IndentStyle::Spaces(1) => "1 space".to_owned(),
+            IndentStyle::Spaces(spaces) => format!("{} spaces", spaces),
+            IndentStyle::Tabs(1) => "1 tab".to_owned(),
+            IndentStyle::Tabs(tabs) => format!("{} tabs", tabs),
+        }
+    }
 }
 
 /// An iterator over the values of the graphemes of a Rope.
@@ -167,6 +199,52 @@ impl EditorState {
             });
 
         let rope = Rope::from(string);
+
+        // get the indentation style used in the file
+        let mut indent = 0;
+        let mut is_tabs = false;
+
+        for (i, line) in rope.lines(..).enumerate() {
+            // don't try too hard to get the indentation style
+            if i == 300 {
+                break;
+            }
+
+            let mut it = line.chars();
+            match it.next() {
+                Some('\t') => is_tabs = true,
+                Some(' ') => is_tabs = false,
+                Some(_) => continue,
+                None => break,
+            }
+
+            indent += 1;
+            for c in it {
+                if (" \t").contains(c) || c == '\t' && !is_tabs || c == ' ' && is_tabs {
+                    break;
+                }
+
+                indent += 1;
+
+                // what kind of sick fuck uses more than 8 tabs to indent its code
+                // this is probably just empty space in a file
+                if indent > 8 {
+                    indent = 0;
+                    break;
+                }
+            }
+
+            break;
+        }
+
+        let indent_style = if indent == 0 {
+            IndentStyle::Spaces(4)
+        } else if is_tabs {
+            IndentStyle::Tabs(indent)
+        } else {
+            IndentStyle::Spaces(indent)
+        };
+
         let engine = Engine::new(rope);
 
         let mut editor = Self {
@@ -176,6 +254,7 @@ impl EditorState {
             delta: DeltaState::new_empty(engine.get_head_rev_id()),
             engine: Arc::new(Mutex::new(engine)),
             file,
+            indent_style,
             line_ending,
             lsp: None,
             language,

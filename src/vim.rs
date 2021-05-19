@@ -10,7 +10,7 @@ use druid::{
     keyboard_types::Key,
     Application, Data, EventCtx, FileDialogOptions, Modifiers,
 };
-use std::{char, sync::Arc};
+use std::{char, fmt::Display, sync::Arc};
 
 /// Characters that should be matched with their closing
 /// counterpart upon insertion.
@@ -60,17 +60,19 @@ impl VimAction {
 
     /// Adds a char to the action.
     pub fn add_char(&mut self, c: char) {
-        let chars = Arc::make_mut(&mut self.chars);
-        chars.push(c);
-
         if self.kind == VimActionKind::None {
-            if c.is_ascii_digit() {
+            if c.is_ascii_digit() && self.chars.is_empty() {
                 let numbers = Arc::make_mut(&mut self.numbers);
                 numbers.push(c);
-            } else if let Some(kind) = VimActionKind::try_new(&self.chars) {
-                self.kind = kind;
-                if self.kind.is_immediate() {
-                    self.is_done = true;
+            } else {
+                let chars = Arc::make_mut(&mut self.chars);
+                chars.push(c);
+
+                if let Some(kind) = VimActionKind::try_new(&self.chars) {
+                    self.kind = kind;
+                    if self.kind.is_immediate() {
+                        self.is_done = true;
+                    }
                 }
             }
         } else {
@@ -85,7 +87,7 @@ impl VimAction {
 
 impl ToString for VimAction {
     fn to_string(&self) -> String {
-        self.chars.to_string()
+        format!("{}{}{}", self.numbers, self.chars, self.motion)
     }
 }
 
@@ -171,6 +173,12 @@ impl VimMotion {
             self.kind = Some(motion_kind.clone());
             motion_kind
         })
+    }
+}
+
+impl Display for VimMotion {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}{}", self.numbers, self.chars)
     }
 }
 
@@ -717,7 +725,7 @@ impl VimState {
 
             // inserting a tab
             Key::Tab if !mods.action_key() && self.mode == EditMode::Insert => {
-                editor.insert("\t");
+                editor.insert(&editor.indent_style.get());
             }
 
             // going to the next line
