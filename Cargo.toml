@@ -3,7 +3,7 @@ name = "ne2"
 version = "0.1.0"
 authors = ["truelossless <esteban.gressard@gmail.com>"]
 edition = "2018"
-licence = "MIT"
+license = "MIT"
 
 [dependencies]
 druid = { git = "https://github.com/linebender/druid.git", features = ["im", "svg"] }

@@ -142,8 +142,6 @@ impl EditorState {
         };
 
         let first_line = string.lines().next();
-        let x = if string.is_empty() { None } else { Some(0) };
-
         let file = start_path.clone().map(Arc::new);
 
         // get the syntax from the file extension or the first line of the file
@@ -169,16 +167,10 @@ impl EditorState {
             });
 
         let rope = Rope::from(string);
-        let over_param = rope.next_grapheme_offset(0).unwrap_or_default();
         let engine = Engine::new(rope);
 
-        Self {
-            cursor: Cursor {
-                x,
-                wanted_x: 0,
-                y: 0,
-                mode: CursorMode::Over(over_param),
-            },
+        let mut editor = Self {
+            cursor: Cursor::default(),
             line_offset: 0.,
             lines_displayed: Cell::new(0),
             delta: DeltaState::new_empty(engine.get_head_rev_id()),
@@ -187,7 +179,11 @@ impl EditorState {
             line_ending,
             lsp: None,
             language,
-        }
+        };
+
+        editor.update_cursor_over_size();
+        editor.update_cursor_offset();
+        editor
     }
 
     /// Finds the file's language when given a path and a first line.
@@ -253,47 +249,19 @@ impl EditorState {
         });
     }
 
-    /// Updates the cursor region in case of an Over cursor.
-    pub fn update_cursor_region(&mut self) {
-        if self.cursor.mode == CursorMode::Boundary {
+    /// Updates the cursor over parameter.
+    pub fn update_cursor_over_size(&mut self) {
+        if self.cursor.mode == CursorMode::Boundary || self.cursor.x.is_none() {
             return;
         }
 
+        let cursor_offset = self.cursor_offset();
         let buffer = self.buffer();
-        let line_offset = buffer.offset_of_line(self.cursor.y);
-
-        let size = match self.cursor.x {
-            None => 0,
-            Some(x) => {
-                let mut it = GraphemeIterator::new(&buffer, line_offset);
-                let start_offset = if x == 0 {
-                    line_offset
-                } else {
-                    it.nth(x - 1).unwrap()
-                };
-                it.next().unwrap() - start_offset
-            }
-        };
-
-        self.cursor.mode = CursorMode::Over(size);
+        self.cursor.over_size =
+            Some(buffer.next_grapheme_offset(cursor_offset).unwrap() - cursor_offset);
     }
 
-    /// Updates the cursor's x coordinate to None if it's on a empty line.
-    pub fn update_empty_line(&mut self) {
-        if self.cursor.x.is_none() {
-            return;
-        }
-
-        let buffer = self.buffer();
-        let line_offset = buffer.offset_of_line(self.cursor.y);
-        let line = buffer.lines(line_offset..).next();
-
-        if line.unwrap_or_default().is_empty() {
-            self.cursor.x = None;
-        }
-    }
-
-    /// Updates the line offset if needed.
+    /// Updates the editor's line offset if needed.
     pub fn update_line_offset(&mut self) {
         if self.first_line() > self.cursor.y {
             self.line_offset = self.cursor.y as f64;
@@ -314,6 +282,7 @@ impl EditorState {
 
     /// Removes the specified range from the buffer while registering the edit in the engine.
     pub fn remove(&mut self, range: Range<usize>) {
+        self.invalidate_cursor();
         let mut engine = self.engine.lock().unwrap();
         let rev = engine.get_head_rev_id().token();
 
@@ -328,6 +297,7 @@ impl EditorState {
 
     /// Edits the specified range of the buffer while registering the edit in the engine.
     pub fn edit(&mut self, range: Range<usize>, text: &str) {
+        self.invalidate_cursor();
         let mut engine = self.engine.lock().unwrap();
         let rev = engine.get_head_rev_id().token();
 
@@ -340,50 +310,101 @@ impl EditorState {
         self.delta = DeltaState::new(delta, engine.get_head_rev_id());
     }
 
-    /// Gets the x offset of the cursor.
-    pub fn cursor_x_offset(&self) -> usize {
-        let buffer = self.buffer();
-        let line_offset = buffer.offset_of_line(self.cursor.y);
+    /// Sets the x coordinate of the cursor and updates Cursor::wanted_x if desired.
+    pub fn set_cursor_x(&mut self, grapheme_idx: usize, update_wanted_x: bool) {
+        self.invalidate_cursor();
+        self.cursor.x = Some(grapheme_idx);
 
-        let x = match self.cursor.x {
-            Some(0) | None => return 0,
-            Some(x) => x,
-        };
+        if update_wanted_x {
+            self.cursor.wanted_x = grapheme_idx;
+        }
 
-        GraphemeIterator::new(&buffer, line_offset)
-            .nth(x - 1)
-            .unwrap()
-            - line_offset
+        if grapheme_idx == 0 {
+            let buffer = self.buffer();
+            let line = buffer.lines(self.cursor_y_offset()..).next();
+
+            if line.unwrap_or_default().is_empty() {
+                self.cursor.x = None;
+            }
+        } else {
+            self.cursor.x = Some(grapheme_idx);
+        }
     }
 
-    /// Gets the offset behind the cursor.
-    pub fn cursor_offset(&self) -> usize {
+    /// Sets the y coordinate of the cursor.
+    pub fn set_cursor_y(&mut self, line_idx: usize) {
+        self.invalidate_cursor();
+        self.cursor.y = line_idx;
+    }
+
+    /// Updates the cursor offset if needed.
+    pub fn update_cursor_offset(&mut self) {
+        if self.cursor.x_offset.is_some() && self.cursor.y_offset.is_some() {
+            return;
+        }
+
         let buffer = self.buffer();
         let line_offset = buffer.offset_of_line(self.cursor.y);
+        self.cursor.y_offset = Some(line_offset);
 
-        let x = match self.cursor.x {
-            Some(0) | None => return line_offset,
-            Some(x) => x,
+        match self.cursor.x {
+            Some(0) | None => self.cursor.x_offset = Some(0),
+            Some(x) => {
+                self.cursor.x_offset = Some(
+                    GraphemeIterator::new(&buffer, line_offset)
+                        .nth(x - 1)
+                        .unwrap()
+                        - line_offset,
+                );
+            }
         };
+    }
 
-        GraphemeIterator::new(&buffer, line_offset)
-            .nth(x - 1)
-            .unwrap()
+    /// Lazily gets the byte offset of the x coordinate of the cursor.
+    pub fn cursor_x_offset(&mut self) -> usize {
+        self.update_cursor_offset();
+        self.cursor.x_offset.unwrap()
+    }
+
+    /// Lazily gets the byte offset of the cursor's line.
+    pub fn cursor_y_offset(&mut self) -> usize {
+        self.update_cursor_offset();
+        self.cursor.y_offset.unwrap()
+    }
+
+    /// Lazily gets the offset behind the cursor.
+    pub fn cursor_offset(&mut self) -> usize {
+        self.update_cursor_offset();
+        self.cursor.x_offset.unwrap() + self.cursor.y_offset.unwrap()
+    }
+
+    /// Lazily gets the cursor over size.
+    pub fn cursor_over_size(&mut self) -> usize {
+        self.update_cursor_over_size();
+        self.cursor.over_size.unwrap()
+    }
+
+    /// Invalidates the cached cursor offset and over size.
+    pub fn invalidate_cursor(&mut self) {
+        self.cursor.x_offset = None;
+        self.cursor.y_offset = None;
+        self.cursor.over_size = None;
     }
 
     /// Infers the text range affected by vim primitives
-    pub fn infer_range(&self, motion: VimMotionKind, multiplier: usize) -> Range<usize> {
+    pub fn infer_range(&mut self, motion: VimMotionKind, multiplier: usize) -> Range<usize> {
         let start;
         let end;
         match motion {
             VimMotionKind::Line => {
-                start = self.buffer().offset_of_line(self.cursor.y);
-                let buffer_len = self.buffer().measure::<LinesMetric>();
+                start = self.cursor_y_offset();
+                let buffer = self.buffer();
+                let buffer_len = buffer.measure::<LinesMetric>();
 
                 if self.cursor.y + multiplier > buffer_len {
-                    end = self.buffer().offset_of_line(buffer_len + 1);
+                    end = buffer.offset_of_line(buffer_len + 1);
                 } else {
-                    end = self.buffer().offset_of_line(self.cursor.y + multiplier);
+                    end = buffer.offset_of_line(self.cursor.y + multiplier);
                 }
             }
 
@@ -436,7 +457,7 @@ impl EditorState {
 
         // delete the newline and go the previous line
         if cursor_x == 0 {
-            self.cursor.y -= 1;
+            self.set_cursor_y(self.cursor.y - 1);
             self.cursor_to_eol();
             self.move_cursor(Direction::Left);
             self.delete_line_ending(self.cursor.y);
@@ -444,8 +465,7 @@ impl EditorState {
         // delete one character on the current line
         } else {
             let cursor_offset = self.cursor_offset();
-            self.cursor.x = Some(cursor_x - 1);
-            self.cursor.wanted_x = cursor_x - 1;
+            self.set_cursor_x(cursor_x - 1, true);
 
             let prev_grapheme = self.buffer().prev_grapheme_offset(cursor_offset).unwrap();
             self.remove(prev_grapheme..cursor_offset);
@@ -466,7 +486,7 @@ impl EditorState {
             0
         };
 
-        let byte_offset = self.buffer().offset_of_line(line_idx) + line.len() - line_ending_len;
+        let byte_offset = line_offset + line.len() - line_ending_len;
         self.remove(byte_offset..byte_offset + line_ending_len);
     }
 
@@ -483,44 +503,55 @@ impl EditorState {
         })
     }
 
+    /// Changes the cursor to over mode.
+    #[inline]
+    pub fn cursor_to_over(&mut self) {
+        self.cursor.mode = CursorMode::Over;
+        self.update_cursor_over_size();
+        self.update_cursor_offset();
+    }
+
+    /// Changes the cursor to boundary mode.
+    #[inline]
+    pub fn cursor_to_boundary(&mut self) {
+        self.cursor.mode = CursorMode::Boundary;
+        self.update_cursor_offset();
+    }
+
     /// Moves the cursor to the end of the line. This means on the last character
     /// if the cursor mode is set on Over, or after the last character if the cursor
     /// mode is set on Boundary.
     pub fn cursor_to_eol(&mut self) {
-        if let Some(x) = self.last_grapheme_for_line(self.cursor.y) {
-            if self.cursor.mode == CursorMode::Boundary {
-                self.cursor.x = Some(x + 1);
-                self.cursor.wanted_x = x + 1;
-            } else {
-                self.cursor.x = Some(x);
-                self.cursor.wanted_x = x;
-            }
+        let x = self
+            .last_grapheme_for_line(self.cursor.y)
+            .unwrap_or_default();
+
+        if self.cursor.mode == CursorMode::Boundary {
+            self.set_cursor_x(x + 1, true);
         } else {
-            self.cursor.x = None;
-            self.cursor.wanted_x = 0;
+            self.set_cursor_x(x, true);
         }
     }
 
     /// Moves the cursor to the start of the line.
     #[inline]
     pub fn cursor_to_sol(&mut self) {
-        self.cursor.x = Some(0);
-        self.cursor.wanted_x = 0;
+        self.set_cursor_x(0, true);
     }
 
     /// Moves the cursor to the specified line.
     #[inline]
     pub fn cursor_to_line(&mut self, line_idx: usize) {
-        self.cursor.y = line_idx;
+        self.set_cursor_y(line_idx);
         self.cursor_to_sol();
     }
 
     /// Inserts a newline at the cursor position and matches the indentation level.
     pub fn cursor_to_newline(&mut self) {
-        let indent = self.insert_newline(self.cursor_offset());
-        self.cursor.y += 1;
-        self.cursor.x = Some(indent);
-        self.cursor.wanted_x = indent;
+        let cursor_offset = self.cursor_offset();
+        let indent = self.insert_newline(cursor_offset);
+        self.set_cursor_y(self.cursor.y + 1);
+        self.set_cursor_x(indent, true);
     }
 
     /// Moves the cursor to the specified byte offset.
@@ -531,13 +562,11 @@ impl EditorState {
             return;
         }
 
-        self.cursor.y = buffer.line_of_offset(byte_offset);
-        let line_start = buffer.offset_of_line(self.cursor.y);
-        let x = GraphemeIterator::new(&buffer, line_start)
+        self.set_cursor_y(buffer.line_of_offset(byte_offset));
+        let x = GraphemeIterator::new(&buffer, self.cursor_y_offset())
             .take_while(|&offset| offset <= byte_offset)
             .count();
-        self.cursor.x = Some(x);
-        self.cursor.wanted_x = x;
+        self.set_cursor_x(x, true);
     }
 
     /// Moves the cursor in the specified direction.
@@ -550,21 +579,24 @@ impl EditorState {
 
         match direction {
             Direction::Up if self.cursor.y > 0 => {
-                self.cursor.y -= 1;
-                self.cursor.x = self
+                self.set_cursor_y(self.cursor.y - 1);
+
+                let x = self
                     .last_grapheme_for_line(self.cursor.y)
                     .map(|last_char| self.cursor.wanted_x.min(last_char - boundary));
+                self.set_cursor_x(x.unwrap_or_default(), false);
             }
             Direction::Down if self.cursor.y < self.buffer().measure::<LinesMetric>() => {
-                self.cursor.y += 1;
-                self.cursor.x = self
+                self.set_cursor_y(self.cursor.y + 1);
+
+                let x = self
                     .last_grapheme_for_line(self.cursor.y)
                     .map(|last_char| self.cursor.wanted_x.min(last_char - boundary));
+                self.set_cursor_x(x.unwrap_or_default(), false)
             }
             Direction::Left if self.cursor.x > Some(0) => {
                 let new_x = self.cursor.x.unwrap() - 1;
-                self.cursor.x = Some(new_x);
-                self.cursor.wanted_x = new_x;
+                self.set_cursor_x(new_x, true);
             }
             Direction::Right => {
                 if let Some(x) = self.cursor.x {
@@ -572,8 +604,7 @@ impl EditorState {
 
                     // allow positionning the cursor at the end of the line in insert mode
                     if Some(x + boundary) < last_char {
-                        self.cursor.x = Some(x + 1);
-                        self.cursor.wanted_x = x + 1;
+                        self.set_cursor_x(x + 1, true);
                     }
                 }
             }
@@ -586,8 +617,7 @@ impl EditorState {
         let offset = self.cursor_offset();
         self.edit(offset..offset, text);
         let x = self.cursor.x.unwrap_or_default() + text.graphemes(true).count();
-        self.cursor.wanted_x = x;
-        self.cursor.x = Some(x);
+        self.set_cursor_x(x, true);
     }
 
     /// Inserts a newline at the specified byte offset and matches the identation level
@@ -644,16 +674,12 @@ impl EditorState {
 
     /// Saves the buffer to the current file.
     pub fn save_to_file(&mut self) {
-        let file = match &self.file {
-            Some(file) => file,
-            None => {
-                return;
-            }
-        };
-
         let buffer = self.buffer();
-        fs::write(file.as_os_str(), buffer.slice_to_cow(..).as_bytes())
-            .expect("Could not write file to disk!");
+        fs::write(
+            self.file.as_ref().unwrap().as_os_str(),
+            buffer.slice_to_cow(..).as_bytes(),
+        )
+        .expect("Could not write file to disk!");
     }
 }
 
@@ -709,7 +735,7 @@ impl Data for DeltaState {
 }
 
 /// A cursor.
-#[derive(Clone, Data, Debug)]
+#[derive(Clone, Data, Debug, Default)]
 pub struct Cursor {
     /// The wanted x coordinate in utf-8 graphemes.
     pub wanted_x: usize,
@@ -719,6 +745,12 @@ pub struct Cursor {
     pub y: usize,
     /// The mode of the cursor.
     pub mode: CursorMode,
+    /// The cached x offset since the start of the line, in bytes.
+    pub x_offset: Option<usize>,
+    /// The cached y offset in bytes.
+    pub y_offset: Option<usize>,
+    /// The over size in over mode.
+    pub over_size: Option<usize>,
 }
 
 /// The mode of a cursor. Specifically, how a cursor interacts with the underlaying characters.
@@ -726,15 +758,14 @@ pub struct Cursor {
 pub enum CursorMode {
     /// A cursor right over a character. This is how a cursor is represented in vim's normal mode.
     /// What we visually identify as a character is not always of the same size.
-    /// This is why we have an usize parameter, tracking the grapheme size.
-    /// If the cursor is not on any character but on an empty line, this should be 0.
+    /// This is why we have Cursor::over_size, tracking the grapheme size.
     /// ```text
-    /// Cursor pos   Over parameter
+    /// Cursor pos     Over size
     ///      --------------  
     ///     |       é      |
     ///      --------------
     /// ```
-    Over(usize),
+    Over,
     /// A cursor at a character boundary (right before or right after a character). This is how a cursor is
     /// represented in vim's insert mode.
     /// ```text
@@ -742,6 +773,12 @@ pub enum CursorMode {
     ///             é      |
     /// ```
     Boundary,
+}
+
+impl Default for CursorMode {
+    fn default() -> Self {
+        Self::Over
+    }
 }
 
 /// Represents a cursor move
@@ -964,18 +1001,11 @@ impl Widget<AppState> for Ne2Editor {
             }
 
             Event::KeyDown(key) => {
-                let old_delta = data.editor.delta.clone();
-                let old_cursor = data.editor.cursor.clone();
-
                 data.vim
                     .handle_key(key.key.clone(), key.mods, &mut data.editor, ctx);
                 data.editor.update_line_offset();
-
-                if !data.editor.delta.same(&old_delta) || !data.editor.cursor.same(&old_cursor) {
-                    data.editor.update_empty_line();
-                    data.editor.update_cursor_region();
-                }
-
+                data.editor.update_cursor_offset();
+                data.editor.update_cursor_over_size();
                 ctx.set_handled();
             }
 
@@ -1170,15 +1200,17 @@ impl Widget<AppState> for Ne2Editor {
                 .with_origin((0., line_y.y_offset));
             rc.fill(line_rect, &line_highlight_color);
 
-            let cursor_char = line_y.start_offset + data.editor.cursor_x_offset();
+            let cursor_offset = line_y.start_offset + data.editor.cursor.x_offset.unwrap();
 
             rc.transform(Affine::translate(text_pos.to_vec2()));
 
             // draw the thicc cursor
-            if let CursorMode::Over(grapheme_size) = data.editor.cursor.mode {
+            if data.editor.cursor.mode == CursorMode::Over {
                 let cursor_shape = if data.editor.cursor.x.is_some() {
                     self.text_view
-                        .rects_for_range(cursor_char..cursor_char + grapheme_size)
+                        .rects_for_range(
+                            cursor_offset..cursor_offset + data.editor.cursor.over_size.unwrap(),
+                        )
                         .into_iter()
                         .next()
                         .unwrap()
@@ -1192,7 +1224,7 @@ impl Widget<AppState> for Ne2Editor {
 
             // in insert mode draw a simple cursor
             } else {
-                let cursor_line = self.text_view.cursor_line_for_text_position(cursor_char);
+                let cursor_line = self.text_view.cursor_line_for_text_position(cursor_offset);
                 rc.stroke(cursor_line, &cursor_color, 2.);
             }
         });

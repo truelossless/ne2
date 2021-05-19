@@ -2,7 +2,7 @@
 
 use crate::{
     app::SAVE_FILE_AS_AND_EXIT,
-    editor::{CursorMode, Direction, EditorState, OPEN_DIRECTORY},
+    editor::{Direction, EditorState, OPEN_DIRECTORY},
     utils::ActionKey,
 };
 use druid::{
@@ -25,7 +25,7 @@ pub struct VimAction {
     is_done: bool,
     /// The underlying motion.
     motion: VimMotion,
-    /// All the characters in the motion.
+    /// All the characters in the action.
     chars: Arc<String>,
     /// The multiplier, in its text form.
     numbers: Arc<String>,
@@ -60,13 +60,15 @@ impl VimAction {
 
     /// Adds a char to the action.
     pub fn add_char(&mut self, c: char) {
+        let chars = Arc::make_mut(&mut self.chars);
+        chars.push(c);
+
         if self.kind == VimActionKind::None {
             if c.is_ascii_digit() {
                 let numbers = Arc::make_mut(&mut self.numbers);
                 numbers.push(c);
-            } else {
-                self.kind = VimActionKind::new(c);
-
+            } else if let Some(kind) = VimActionKind::try_new(&self.chars) {
+                self.kind = kind;
                 if self.kind.is_immediate() {
                     self.is_done = true;
                 }
@@ -78,9 +80,6 @@ impl VimAction {
                 self.is_done = true;
             }
         }
-
-        let chars = Arc::make_mut(&mut self.chars);
-        chars.push(c);
     }
 }
 
@@ -232,6 +231,10 @@ pub enum VimActionKind {
     Change,
     /// Deletes text.
     Delete,
+    /// Deletes a character.
+    DeleteChar,
+    /// Replaces a character.
+    ReplaceChar(char),
     /// Moves somewhere
     Move(VimMotionKind),
     /// Repeats the latest action.
@@ -245,28 +248,32 @@ impl Default for VimActionKind {
 }
 
 impl VimActionKind {
-    /// Creates a new VimActionKind based on the first char.
-    pub fn new(c: char) -> Self {
-        match c {
-            'i' => VimActionKind::Insert,
-            'a' => VimActionKind::Append,
-            'o' => VimActionKind::AppendLine,
-            'O' => VimActionKind::PrependLine,
-            'd' => VimActionKind::Delete,
-            'c' => VimActionKind::Change,
-            'w' => VimActionKind::Move(VimMotionKind::WordStartForwards),
-            'W' => VimActionKind::Move(VimMotionKind::FullWordStartForwards),
-            'e' => VimActionKind::Move(VimMotionKind::WordEndForwards),
-            'E' => VimActionKind::Move(VimMotionKind::FullWordEndForwards),
-            'b' => VimActionKind::Move(VimMotionKind::WordStartForwards),
-            'B' => VimActionKind::Move(VimMotionKind::WordStartBackwards),
-            'h' => VimActionKind::Move(VimMotionKind::CharacterBackwards),
-            'j' => VimActionKind::Move(VimMotionKind::CharacterDownwards),
-            'k' => VimActionKind::Move(VimMotionKind::CharacterUpwards),
-            'l' => VimActionKind::Move(VimMotionKind::CharacterForwards),
-            '.' => VimActionKind::Repeat,
-            _ => unimplemented!(),
-        }
+    /// Tries to create a new VimActionKind based on the first chars.
+    /// This returns None if we need more context to create the action.
+    pub fn try_new(s: &str) -> Option<Self> {
+        Some(match s.chars().collect::<Vec<_>>()[..] {
+            ['i'] => VimActionKind::Insert,
+            ['a'] => VimActionKind::Append,
+            ['o'] => VimActionKind::AppendLine,
+            ['O'] => VimActionKind::PrependLine,
+            ['d'] => VimActionKind::Delete,
+            ['c'] => VimActionKind::Change,
+            ['r', next_char] => VimActionKind::ReplaceChar(next_char),
+            ['r'] => return None,
+            ['x'] => VimActionKind::DeleteChar,
+            ['w'] => VimActionKind::Move(VimMotionKind::WordStartForwards),
+            ['W'] => VimActionKind::Move(VimMotionKind::FullWordStartForwards),
+            ['e'] => VimActionKind::Move(VimMotionKind::WordEndForwards),
+            ['E'] => VimActionKind::Move(VimMotionKind::FullWordEndForwards),
+            ['b'] => VimActionKind::Move(VimMotionKind::WordStartForwards),
+            ['B'] => VimActionKind::Move(VimMotionKind::WordStartBackwards),
+            ['h'] => VimActionKind::Move(VimMotionKind::CharacterBackwards),
+            ['j'] => VimActionKind::Move(VimMotionKind::CharacterDownwards),
+            ['k'] => VimActionKind::Move(VimMotionKind::CharacterUpwards),
+            ['l'] => VimActionKind::Move(VimMotionKind::CharacterForwards),
+            ['.'] => VimActionKind::Repeat,
+            _ => VimActionKind::None,
+        })
     }
 
     /// Returns true if the action doesn't need a motion to take effect.
@@ -279,6 +286,8 @@ impl VimActionKind {
                 | VimActionKind::Append
                 | VimActionKind::Repeat
                 | VimActionKind::Move(_)
+                | VimActionKind::ReplaceChar(_)
+                | VimActionKind::DeleteChar
         )
     }
 }
@@ -530,19 +539,35 @@ impl VimState {
                 }
             }
 
+            VimActionKind::ReplaceChar(new_char) => {
+                for _ in 0..self.action.multiplier() {
+                    let offset = editor.cursor_offset();
+                    let over_size = editor.cursor_over_size();
+                    let mut tmp = [0; 4];
+                    editor.edit(offset..offset + over_size, new_char.encode_utf8(&mut tmp));
+                }
+            }
+
+            VimActionKind::DeleteChar => {
+                for _ in 0..self.action.multiplier() {
+                    let offset = editor.cursor_offset();
+                    let over_size = editor.cursor_over_size();
+                    editor.remove(offset..offset + over_size);
+                }
+            }
+
             VimActionKind::PrependLine | VimActionKind::AppendLine => {
                 let line_offset;
 
                 if self.action.kind == VimActionKind::PrependLine {
-                    line_offset = editor.buffer().offset_of_line(editor.cursor.y);
+                    line_offset = editor.cursor.y_offset.unwrap();
                 } else {
                     line_offset = editor.buffer().offset_of_line(editor.cursor.y + 1);
-                    editor.cursor.y += 1;
+                    editor.set_cursor_y(editor.cursor.y + 1);
                 }
 
                 let indent = editor.insert_newline(line_offset);
-                editor.cursor.x = Some(indent);
-                editor.cursor.wanted_x = indent;
+                editor.set_cursor_x(indent, true);
                 self.insert_mode(editor);
             }
 
@@ -589,7 +614,7 @@ impl VimState {
     /// Enters insert mode.
     pub fn insert_mode(&mut self, editor: &mut EditorState) {
         self.mode = EditMode::Insert;
-        editor.cursor.mode = CursorMode::Boundary;
+        editor.cursor_to_boundary();
     }
 
     /// Enters normal mode.
@@ -599,7 +624,7 @@ impl VimState {
         }
 
         self.mode = EditMode::Normal;
-        editor.cursor.mode = CursorMode::Over(0);
+        editor.cursor_to_over();
         self.action = VimAction::default();
         self.command = None;
     }
