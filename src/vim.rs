@@ -1,8 +1,7 @@
 //! Vim-like motions.
 
 use crate::{
-    app::SAVE_FILE_AS_AND_EXIT,
-    editor::{Direction, EditorState, OPEN_DIRECTORY},
+    editor::{Direction, EditorState, OPEN_DIRECTORY, SAVE_FILE_AS_AND_EXIT},
     utils::ActionKey,
 };
 use druid::{

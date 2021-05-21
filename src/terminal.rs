@@ -21,7 +21,7 @@ use crate::{
 };
 
 /// The id of the terminal.
-const TERMINAL_ID: WidgetId = WidgetId::reserved(3);
+const TERMINAL_ID: WidgetId = WidgetId::reserved(2);
 
 /// The Command sent when a new line of the terminal is available.
 const NEW_TERM_DATA: Selector<String> = Selector::new("ne2.terminal.new_term_line");

@@ -22,7 +22,7 @@ use std::{
     cell::Cell,
     fs, iter,
     ops::Range,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
 use syntect::{highlighting::FontStyle, parsing::SyntaxReference};
@@ -34,6 +34,9 @@ use xi_rope::{
 
 /// The command sent when a directory is open.
 pub const OPEN_DIRECTORY: Selector<FileInfo> = Selector::new("ne2.editor.open_directory");
+
+/// Command to exit just after saving the file.
+pub const SAVE_FILE_AS_AND_EXIT: Selector<FileInfo> = Selector::new("ne2.editor.save_as_and_exit");
 
 /// The id of the editor.
 pub const EDITOR_ID: WidgetId = WidgetId::reserved(1);
@@ -66,7 +69,7 @@ pub struct EditorState {
     /// The programming language of the current file.
     pub language: String,
     /// The path of the file being edited. None if the file hasn't been saved to the disk yet.
-    pub file: Option<Arc<PathBuf>>,
+    pub file: Option<Arc<Path>>,
     /// The attached LSP server if there is one.
     #[data(ignore)]
     pub lsp: Option<Arc<Mutex<LspServer>>>,
@@ -85,7 +88,7 @@ impl IndentStyle {
     /// Gets the indentation corresponding to this style.
     pub fn get(&self) -> String {
         match self {
-            IndentStyle::Spaces(spaces) => " ".repeat(*spaces  as usize),
+            IndentStyle::Spaces(spaces) => " ".repeat(*spaces as usize),
             IndentStyle::Tabs(tabs) => "\t".repeat(*tabs as usize),
         }
     }
@@ -165,19 +168,20 @@ impl<'a> Iterator for GraphemeIterator<'a> {
 
 impl EditorState {
     /// Builds the editor's default state.
-    pub fn new(start_path: Option<PathBuf>) -> Self {
+    pub fn new(start_file: Option<PathBuf>) -> Self {
         // we store first the buffer in a string before passing it to the rope.
-        let string = if let Some(path) = &start_path {
+        let string = if let Some(path) = &start_file {
             fs::read_to_string(path).expect("Invalid file path!")
         } else {
             String::new()
         };
 
-        let first_line = string.lines().next();
-        let file = start_path.clone().map(Arc::new);
+        let file = start_file.as_deref().map(Arc::from);
+        let rope = Rope::from(string);
+        let first_line = rope.lines_raw(..).next();
 
         // get the syntax from the file extension or the first line of the file
-        let language = EditorState::find_language(start_path, first_line);
+        let language = EditorState::find_language(start_file, first_line.as_ref());
 
         let line_ending = first_line
             .and_then(|line| {
@@ -198,13 +202,11 @@ impl EditorState {
                 }
             });
 
-        let rope = Rope::from(string);
-
         // get the indentation style used in the file
         let mut indent = 0;
         let mut is_tabs = false;
 
-        for (i, line) in rope.lines(..).enumerate() {
+        for (i, line) in rope.lines_raw(..).enumerate() {
             // don't try too hard to get the indentation style
             if i == 300 {
                 break;
@@ -214,19 +216,17 @@ impl EditorState {
             match it.next() {
                 Some('\t') => is_tabs = true,
                 Some(' ') => is_tabs = false,
-                Some(_) => continue,
-                None => break,
+                _ => continue,
             }
 
             indent += 1;
             for c in it {
-                if (" \t").contains(c) || c == '\t' && !is_tabs || c == ' ' && is_tabs {
+                if !(" \t").contains(c) || c == '\t' && !is_tabs || c == ' ' && is_tabs {
                     break;
                 }
 
                 indent += 1;
 
-                // what kind of sick fuck uses more than 8 tabs to indent its code
                 // this is probably just empty space in a file
                 if indent > 8 {
                     indent = 0;
@@ -266,7 +266,7 @@ impl EditorState {
     }
 
     /// Finds the file's language when given a path and a first line.
-    pub fn find_language(path: Option<PathBuf>, first_line: Option<&str>) -> String {
+    pub fn find_language(path: Option<PathBuf>, first_line: Option<&Cow<str>>) -> String {
         path.and_then(|f| f.extension().map(ToOwned::to_owned))
             .and_then(|ext| settings::PS.find_syntax_by_extension(ext.to_str().unwrap_or_default()))
             .or_else(|| {
@@ -309,17 +309,11 @@ impl EditorState {
     /// Updates the language.
     pub fn update_language(&mut self) {
         let buffer = self.buffer();
-        if buffer.measure::<LinesMetric>() >= 1 {
-            let first_line_offset = buffer.offset_of_line(1);
-            let slice = buffer.slice_to_cow(..first_line_offset);
-            self.language = EditorState::find_language(
-                self.file.as_ref().map(|a| a.to_path_buf()),
-                Some(&slice),
-            );
-        } else {
-            self.language =
-                EditorState::find_language(self.file.as_ref().map(|a| a.to_path_buf()), None);
-        };
+        let first_line = buffer.lines_raw(..).next();
+        self.language = EditorState::find_language(
+            self.file.as_ref().map(|a| a.to_path_buf()),
+            first_line.as_ref(),
+        );
 
         // look for this language LSP.
         self.lsp = get_lsp_server(&self.language).map(|lsp| {
@@ -1061,8 +1055,8 @@ impl Widget<AppState> for Ne2Editor {
         _env: &Env,
     ) {
         match event {
-            Event::Command(command) => {
-                if let Some(&first_highlighted_line) = command.get(NEW_HIGHLIGHTING) {
+            Event::Command(cmd) => {
+                if let Some(&first_highlighted_line) = cmd.get(NEW_HIGHLIGHTING) {
                     // update only the textview if the new highlighted lines are in the viewport
                     if data.editor.first_line() <= first_highlighted_line + LINES_PER_COMMAND
                         && first_highlighted_line <= data.editor.last_line()
@@ -1073,7 +1067,7 @@ impl Widget<AppState> for Ne2Editor {
                     ctx.set_handled();
                 }
 
-                if let Some(path) = command.get(OPEN_FILE_IN_EDITOR) {
+                if let Some(path) = cmd.get(OPEN_FILE_IN_EDITOR) {
                     data.open_file(path);
                     ctx.set_handled();
                 }

@@ -14,14 +14,11 @@ use druid::{
     im::Vector,
     lens,
     widget::{
-        Container, Controller, CrossAxisAlignment, Either, Flex, Label, LineBreaking, List, Maybe,
-        ProgressBar, SizedBox, Svg,
+        Container, CrossAxisAlignment, Either, Flex, Label, LineBreaking, List, Maybe, ProgressBar,
+        SizedBox, Svg,
     },
-    ArcStr, Data, Event, Lens, LensExt, Selector, Widget, WidgetExt, WidgetId,
+    ArcStr, Data, Lens, LensExt, Selector, Widget, WidgetExt,
 };
-
-/// The id of the notification center.
-pub const NOTIFICATION_CENTER_ID: WidgetId = WidgetId::reserved(2);
 
 /// A command to open a new text notification.
 /// Params:
@@ -201,58 +198,6 @@ impl From<usize> for NotificationId {
     }
 }
 
-/// The notification center controller.
-struct NotificationCenterController;
-impl<W: Widget<AppState>> Controller<AppState, W> for NotificationCenterController {
-    fn event(
-        &mut self,
-        child: &mut W,
-        ctx: &mut druid::EventCtx,
-        event: &druid::Event,
-        data: &mut AppState,
-        env: &druid::Env,
-    ) {
-        if let Event::Command(cmd) = event {
-            if let Some((id, text)) = cmd.get(ADD_TEXT_NOTIFICATION) {
-                data.notification_center
-                    .add_text_notification_with_id(*id, text);
-                return;
-            }
-
-            if let Some((id, text, button_text, callback)) = cmd.get(ADD_BUTTON_NOTIFICATION) {
-                data.notification_center.add_button_notification_with_id(
-                    *id,
-                    text,
-                    button_text,
-                    callback.clone(),
-                );
-                return;
-            }
-
-            if let Some((id, progress)) = cmd.get(UPDATE_PROGRESS_BAR) {
-                if let Some(notif) = data
-                    .notification_center
-                    .get_notification(&NotificationId::String(id))
-                {
-                    notif.progress_bar = Some(*progress);
-                }
-                return;
-            }
-
-            if let Some((id, text)) = cmd.get(UPDATE_TEXT) {
-                if let Some(notif) = data
-                    .notification_center
-                    .get_notification(&NotificationId::String(id))
-                {
-                    notif.text = text.clone();
-                }
-                return;
-            }
-        }
-        child.event(ctx, event, data, env)
-    }
-}
-
 /// Builds a card-like element to display notifications in it.
 fn card<T: Data>(widget: impl Widget<T> + 'static) -> impl Widget<T> {
     Container::new(widget.padding(5.).expand_width())
@@ -347,6 +292,4 @@ pub fn notification_center_builder() -> impl Widget<AppState> {
         .padding((0., 20., 20., 20.))
         .scroll()
         .vertical()
-        .controller(NotificationCenterController)
-        .with_id(NOTIFICATION_CENTER_ID)
 }

@@ -9,7 +9,7 @@ use std::{
 use druid::{
     im::Vector,
     widget::{CrossAxisAlignment, Either, Flex, Label, List, Maybe, SizedBox, Svg},
-    ArcStr, Data, Lens, Selector, Widget, WidgetExt,
+    ArcStr, Data, Lens, LensExt, Selector, Widget, WidgetExt,
 };
 
 use crate::{
@@ -116,18 +116,13 @@ impl FileNode {
 /// Builds the file explorer.
 /// If we don't have any project open, prompt to open a directory.
 pub fn file_explorer_builder() -> impl Widget<AppState> {
-    let tree_root = || {
-        Maybe::new(
-            || List::new(tree_builder).lens(DirContents::files),
-            || Label::new("ITS REALLY empty"),
-        )
-        .lens(FileNode::dir)
-    };
-
-    Maybe::new(tree_root, || Label::new("It's empty there!"))
-        .padding((0., 20., 20., 20.))
-        .scroll()
-        .lens(AppState::project)
+    Maybe::new(
+        || List::new(tree_builder).lens(DirContents::files),
+        || Label::new("It's empty there :)"),
+    )
+    .padding((0., 20., 20., 20.))
+    .scroll()
+    .lens(AppState::project.then(FileNode::dir))
 }
 
 /// One level of the file explorer.

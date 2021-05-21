@@ -5,6 +5,7 @@
 
 use app_dirs2::{app_dir, AppDataType};
 use crossbeam_channel::{unbounded, Receiver, Sender};
+use druid::Target;
 use serde::{Deserialize, Serialize};
 use std::{
     fs::{self, File},
@@ -21,7 +22,7 @@ use crate::{
     app::{AppState, SINK},
     notification_center::{
         Callback, NotificationState, ADD_BUTTON_NOTIFICATION, ADD_TEXT_NOTIFICATION,
-        NOTIFICATION_CENTER_ID, UPDATE_PROGRESS_BAR, UPDATE_TEXT,
+        UPDATE_PROGRESS_BAR, UPDATE_TEXT,
     },
     settings::APP_INFO,
 };
@@ -232,7 +233,7 @@ impl LspServer {
                             None,
                             format!("{} is not installed. You can download it if you turn on your Internet connection.", name)
                         ),
-                        NOTIFICATION_CENTER_ID,
+                        Target::Auto,
                     ).unwrap();
 
                     return;
@@ -265,7 +266,7 @@ impl LspServer {
                             "Download now".to_owned(),
                             callback,
                         ),
-                        NOTIFICATION_CENTER_ID,
+                        Target::Auto,
                     )
                     .unwrap();
                     return;
@@ -281,7 +282,7 @@ impl LspServer {
                         "Download now".to_owned(),
                         callback,
                     ),
-                    NOTIFICATION_CENTER_ID,
+                    Target::Auto,
                 )
                 .unwrap();
             }
@@ -334,7 +335,7 @@ impl LspServer {
                                     "ne2.notification.download_lsp_server",
                                     cumulated_size / content_length,
                                 ),
-                                NOTIFICATION_CENTER_ID,
+                                Target::Auto,
                             )
                             .unwrap();
                         },
@@ -347,7 +348,7 @@ impl LspServer {
                             "ne2.notification.download_lsp_server",
                             Arc::from(format!("{} successfully installed.", name)),
                         ),
-                        NOTIFICATION_CENTER_ID,
+                        Target::Auto,
                     )
                     .unwrap();
                 }
@@ -356,7 +357,7 @@ impl LspServer {
                     sink.submit_command(
                         ADD_TEXT_NOTIFICATION,
                         (None, format!("Error downloading {}: {}", name, err)),
-                        NOTIFICATION_CENTER_ID,
+                        Target::Auto,
                     )
                     .unwrap();
                 }
