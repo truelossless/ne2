@@ -940,7 +940,7 @@ impl Ne2Editor {
     }
 
     /// Updates the text slice in the textview and the line numbers.
-    pub fn update_textview(&mut self, data: &AppState) {
+    pub fn update_textview(&mut self, data: &AppState, factory: &mut PietText, env: &Env) {
         // change the slice of text displayed
         let buffer = data.editor.buffer();
         let first_line = data.editor.first_line();
@@ -951,10 +951,9 @@ impl Ne2Editor {
         } else {
             buffer.offset_of_line(last_line)
         };
+
         let txt = buffer.slice(start..stop);
-
         let mut rich_text = RichText::new(txt.slice_to_cow(..).into());
-
         let mut cursor = xi_rope::Cursor::new(&txt, 0);
 
         if let Some(highlight_cache) = &mut self.highlight_cache {
@@ -1004,21 +1003,29 @@ impl Ne2Editor {
             line_numbers.push('\n');
         }
         self.line_numbers.set_text(line_numbers);
+
+        self.text_view.rebuild_if_needed(factory, env);
+        self.line_numbers.rebuild_if_needed(factory, env);
     }
 
     /// Updates the line numbers column width.
-    pub fn update_line_numbers_width(&mut self, text: &mut PietText, data: &AppState) {
-        // there is no obvious way to get the width that
-        // a text is going to occupy. So we can build
-        // a TextLayout and retreive its size instead.
-        let mut numbers = data.editor.buffer().measure::<LinesMetric>() + 100;
+    pub fn update_line_numbers_width(
+        &mut self,
+        data: &AppState,
+        factory: &mut PietText,
+        env: &Env,
+    ) {
+        // there is no obvious way to get the width that a text is going to occupy.
+        // So we can build a TextLayout and retreive its size instead.
+        let mut numbers =
+            data.editor.buffer().measure::<LinesMetric>() + data.editor.lines_displayed.get();
         let mut string = String::with_capacity(10);
         while numbers != 0 {
             string.push('_');
             numbers /= 10;
         }
 
-        self.line_numbers_width = text
+        self.line_numbers_width = factory
             .new_text_layout(string)
             .font(FONT.family.clone(), FONT.size)
             .build()
@@ -1026,11 +1033,12 @@ impl Ne2Editor {
             .size()
             .width;
         self.line_numbers.set_wrap_width(self.line_numbers_width);
+        self.line_numbers.rebuild_if_needed(factory, env);
     }
 
     /// Updates the line height.
-    pub fn update_line_height(&mut self, text: &mut PietText) {
-        self.line_height = text
+    pub fn update_line_height(&mut self, factory: &mut PietText) {
+        self.line_height = factory
             .new_text_layout("")
             .font(FONT.family.clone(), FONT.size)
             .build()
@@ -1063,7 +1071,7 @@ impl Widget<AppState> for Ne2Editor {
         ctx: &mut druid::EventCtx,
         event: &druid::Event,
         data: &mut AppState,
-        _env: &Env,
+        env: &Env,
     ) {
         match event {
             Event::Command(cmd) => {
@@ -1072,8 +1080,7 @@ impl Widget<AppState> for Ne2Editor {
                     if data.editor.first_line() <= first_highlighted_line + LINES_PER_COMMAND
                         && first_highlighted_line <= data.editor.last_line()
                     {
-                        self.update_textview(data);
-                        ctx.request_layout();
+                        self.update_textview(data, ctx.text(), env);
                     }
                     ctx.set_handled();
                 }
@@ -1114,43 +1121,23 @@ impl Widget<AppState> for Ne2Editor {
         ctx: &mut druid::LifeCycleCtx,
         event: &druid::LifeCycle,
         data: &AppState,
-        _env: &Env,
+        env: &Env,
     ) {
         match event {
             LifeCycle::WidgetAdded => {
                 ctx.register_for_focus();
 
                 self.update_line_height(ctx.text());
-                self.update_line_numbers_width(ctx.text(), data);
                 self.update_normal_cursor(ctx.text());
                 self.update_syntax(data, ctx.get_external_handle());
-                self.update_textview(data);
-
-                data.editor
-                    .update_lines_displayed(ctx.size().height, self.line_height);
-                // #[allow(deprecated)]
-                // if let Some(lsp) = &data.editor.lsp {
-                //     lsp.lock().unwrap().send(
-                //         Initialize::METHOD,
-                //         InitializeParams {
-                //             process_id: Some(process::id()),
-                //             root_path: None,
-                //             root_uri: None,
-                //             initialization_options: None,
-                //             capabilities: ClientCapabilities::default(),
-                //             trace: None,
-                //             workspace_folders: None,
-                //             client_info: None,
-                //             locale: None,
-                //         },
-                //     );
-                // }
+                self.update_textview(data, ctx.text(), env);
             }
 
-            LifeCycle::Size(size) => data
-                .editor
-                .update_lines_displayed(size.height, self.line_height),
-
+            LifeCycle::Size(size) => {
+                data.editor
+                    .update_lines_displayed(size.height, self.line_height);
+                self.update_line_numbers_width(data, ctx.text(), env);
+            }
             _ => (),
         }
     }
@@ -1160,12 +1147,14 @@ impl Widget<AppState> for Ne2Editor {
         ctx: &mut druid::UpdateCtx,
         old_data: &AppState,
         data: &AppState,
-        _env: &druid::Env,
+        env: &druid::Env,
     ) {
         let mut should_update_textview = false;
 
         // check if an edit was made
         if !data.editor.delta.same(&old_data.editor.delta) {
+            should_update_textview = true;
+
             // invalidate the syntax highlighting starting from this line
             if let Some(highlight_cache) = &mut self.highlight_cache {
                 highlight_cache.invalidate(
@@ -1174,12 +1163,12 @@ impl Widget<AppState> for Ne2Editor {
                 );
             }
 
-            should_update_textview = true;
-
             // check if we need to change the size of the line numbers column
-            // we could ideally do this less often, but length comparisons can
-            // be more costly sometimes.
-            self.update_line_numbers_width(ctx.text(), data);
+            let old_buffer = data.editor.delta.old_buffer(&data.editor.engine);
+            if data.editor.buffer().measure::<LinesMetric>() != old_buffer.measure::<LinesMetric>()
+            {
+                self.update_line_numbers_width(data, ctx.text(), env);
+            }
         }
 
         if !data.editor.language.same(&old_data.editor.language) {
@@ -1191,7 +1180,7 @@ impl Widget<AppState> for Ne2Editor {
                 highlight_cache.clear(data.editor.buffer());
             }
 
-            self.update_line_numbers_width(ctx.text(), data);
+            self.update_line_numbers_width(data, ctx.text(), env);
             should_update_textview = true;
         }
 
@@ -1208,10 +1197,9 @@ impl Widget<AppState> for Ne2Editor {
             ctx.request_paint();
         }
 
-        // updating text requires a layout rebuild
         if should_update_textview {
-            self.update_textview(data);
-            ctx.request_layout();
+            self.update_textview(data, ctx.text(), env);
+            ctx.request_paint();
         }
     }
 
