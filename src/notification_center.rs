@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use crate::{
     app::AppState,
+    lsp::LspServerState,
     settings::{CLOSE_ICON, THEME},
     utils::{ButtonController, ToColor},
 };
@@ -275,17 +276,18 @@ pub fn notification_center_builder() -> impl Widget<AppState> {
     );
 
     Flex::column()
-        .with_child(card(
-            Label::dynamic(|data: &AppState, _| {
-                if let Some(lsp) = &data.editor.lsp {
-                    let lsp_name = lsp.lock().unwrap().name;
-                    format!("LSP server: {}", lsp_name)
-                } else {
-                    format!("No LSP server available for {}.", data.editor.language)
-                }
+        .with_child(
+            List::new(|| {
+                card(
+                    Label::dynamic(|data: &LspServerState, _| {
+                        let lsp_server = data.server.lock().unwrap();
+                        format!("LSP server: {}\nstatus: {}", lsp_server.name, data.status)
+                    })
+                    .with_line_break_mode(LineBreaking::WordWrap),
+                )
             })
-            .with_line_break_mode(LineBreaking::WordWrap),
-        ))
+            .lens(AppState::lsp_servers),
+        )
         .with_spacer(10.)
         .with_child(List::new(notification).with_spacing(10.).lens(notifs_lens))
         .fix_width(300.)

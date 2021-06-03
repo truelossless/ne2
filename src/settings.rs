@@ -3,7 +3,7 @@
 use std::{fs, io::Read};
 
 use app_dirs2::{app_root, AppDataType, AppInfo};
-use druid::{widget::SvgData, FontDescriptor, FontFamily, FontStyle, FontWeight};
+use druid::{widget::SvgData, Color, FontDescriptor, FontFamily, FontStyle, FontWeight};
 use fs::File;
 use once_cell::{sync::Lazy, unsync};
 use serde::Deserialize;
@@ -63,6 +63,13 @@ pub static THEME: Lazy<&'static Theme> = Lazy::new(|| {
 /// The font used in the editor.
 pub static FONT: Lazy<FontDescriptor> = Lazy::new(|| SETTINGS.theme.font.clone().into());
 
+/// A small variant of the font.
+pub static SMALL_FONT: Lazy<FontDescriptor> = Lazy::new(|| {
+    let mut small_font = FONT.clone();
+    small_font.size -= 2.;
+    small_font
+});
+
 /// The bell icon.
 pub const BELL_ICON: unsync::Lazy<SvgData> = unsync::Lazy::new(|| {
     svg_fill_color(
@@ -110,6 +117,18 @@ pub const ARROW_DOWN: unsync::Lazy<SvgData> = unsync::Lazy::new(|| {
         THEME.settings.background.unwrap().to_color(),
     )
 });
+
+/// The diagnostic's error icon.
+pub const DIAGNOSTIC_ERROR_ICON: unsync::Lazy<SvgData> =
+    unsync::Lazy::new(|| svg_fill_color(include_str!("../res/icon/error.svg"), Color::WHITE));
+
+/// The diagnostic's warning icon.
+pub const DIAGNOSTIC_WARNING_ICON: unsync::Lazy<SvgData> =
+    unsync::Lazy::new(|| svg_fill_color(include_str!("../res/icon/warning.svg"), Color::WHITE));
+
+/// The diagnostic's info / hint icon.
+pub const DIAGNOSTIC_HINT_ICON: unsync::Lazy<SvgData> =
+    unsync::Lazy::new(|| svg_fill_color(include_str!("../res/icon/info.svg"), Color::WHITE));
 
 #[derive(Deserialize)]
 /// Representation of the Ne2 settings, which is the settings.toml file.

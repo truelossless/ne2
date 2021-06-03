@@ -94,7 +94,7 @@ impl HighlightCache {
                     self.highlights[l] = style;
                 }
 
-                _ => panic!("One line has been skipped, this should never happen!"),
+                _ => (),
             }
         }
     }

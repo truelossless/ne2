@@ -8,7 +8,7 @@ use druid::{
 
 use crate::{
     app::AppState,
-    settings::{FONT, THEME},
+    settings::{SMALL_FONT, THEME},
     utils::ToColor,
 };
 
@@ -41,9 +41,5 @@ pub fn status_bar_builder() -> impl Widget<AppState> {
         .with_child(line_ending)
         .padding((0., 5.))
         .background(THEME.settings.background.unwrap().to_color())
-        .env_scope(|env, _| {
-            let mut small_font = FONT.clone();
-            small_font.size -= 2.;
-            env.set(UI_FONT, small_font)
-        })
+        .env_scope(|env, _| env.set(UI_FONT, SMALL_FONT.clone()))
 }

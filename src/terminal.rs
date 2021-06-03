@@ -9,7 +9,7 @@ use druid::{
     im::Vector,
     keyboard_types::Key,
     text::{RichText, RichTextBuilder},
-    widget::{Axis, Controller, Flex, Label, List, Scroll},
+    widget::{Axis, Controller, Label, List, Scroll},
     Color, Data, Event, FontStyle, FontWeight, Lens, Selector, Widget, WidgetExt, WidgetId,
 };
 use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem, SlavePty};
@@ -17,17 +17,14 @@ use vte::{Params, Parser, Perform};
 
 use crate::{
     app::{AppState, SINK},
-    utils::{ActionKey, LineEnding},
+    utils::ActionKey,
 };
 
 /// The id of the terminal.
 const TERMINAL_ID: WidgetId = WidgetId::reserved(2);
 
-/// The Command sent when a new line of the terminal is available.
-const NEW_TERM_DATA: Selector<String> = Selector::new("ne2.terminal.new_term_line");
-
-/// The notification sent when the terminal scroll needs to be updated.
-const SCROLL_BOTTOM: Selector<()> = Selector::new("ne2.terminal.scroll_bottom");
+/// Command sent when new data from the terminal is available.
+const NEW_TERM_DATA: Selector<String> = Selector::new("ne2.terminal.new_term_data");
 
 /// The maximum number of lines to be displayed in the editor.
 const MAX_TERM_LINES: usize = 200;
@@ -44,40 +41,6 @@ pub struct TerminalState {
     pub last_line: String,
     /// Checks if the last line is complete (e.g it is LF-terminated).
     pub last_line_complete: bool,
-}
-
-/// A shell in a pty.
-#[derive(Clone)]
-pub struct Shell {
-    /// The command and args used to spawn the shell.
-    command: &'static str,
-    /// The line ending used to submit a command.
-    line_ending: LineEnding,
-}
-
-/// The scroll controller. This allows us to scroll to the bottom of
-/// the terminal when we receive new data from the shell.
-pub struct ScrollController;
-
-impl<T: Data, W: Widget<T>> Controller<T, Scroll<T, W>> for ScrollController {
-    fn event(
-        &mut self,
-        child: &mut Scroll<T, W>,
-        ctx: &mut druid::EventCtx,
-        event: &Event,
-        data: &mut T,
-        env: &druid::Env,
-    ) {
-        child.event(ctx, event, data, env);
-        match event {
-            Event::Command(cmd) if cmd.is(SCROLL_BOTTOM) => {
-                child.scroll_to_on_axis(Axis::Vertical, child.child_size().height);
-                ctx.set_handled();
-            }
-
-            _ => (),
-        }
-    }
 }
 
 /// The terminal controller.
@@ -147,12 +110,14 @@ impl TerminalController {
     }
 }
 
-impl<W: Widget<TerminalState>> Controller<TerminalState, W> for TerminalController {
+impl<W: Widget<TerminalState>> Controller<TerminalState, Scroll<TerminalState, W>>
+    for TerminalController
+{
     fn event(
         &mut self,
-        child: &mut W,
+        child: &mut Scroll<TerminalState, W>,
         ctx: &mut druid::EventCtx,
-        event: &druid::Event,
+        event: &Event,
         data: &mut TerminalState,
         env: &druid::Env,
     ) {
@@ -169,28 +134,32 @@ impl<W: Widget<TerminalState>> Controller<TerminalState, W> for TerminalControll
 
                         self.sender.write_all(command.as_bytes()).unwrap();
                         self.sender.flush().unwrap();
+
+                        child.scroll_to_on_axis(Axis::Vertical, child.child_size().height);
                     }
 
                     Key::Backspace => {
                         data.command.pop();
                         self.update_last_line(data);
+                        child.scroll_to_on_axis(Axis::Vertical, child.child_size().height);
                     }
 
                     Key::Character(c) if !key_event.mods.action_key() => {
                         data.command.push_str(&c);
                         self.update_last_line(data);
+                        child.scroll_to_on_axis(Axis::Vertical, child.child_size().height);
                     }
 
                     // CTRL + C (SIGQUIT)
                     Key::Character(c) if c == "c" && key_event.mods.ctrl() => {
                         self.sender.write_all(&[3]).unwrap();
                         self.sender.flush().unwrap();
+                        child.scroll_to_on_axis(Axis::Vertical, child.child_size().height);
                     }
 
                     _ => (),
                 }
                 ctx.set_handled();
-                ctx.submit_command(SCROLL_BOTTOM.to(TERMINAL_ID));
             }
 
             Event::MouseDown(_) => {
@@ -200,7 +169,6 @@ impl<W: Widget<TerminalState>> Controller<TerminalState, W> for TerminalControll
             Event::Command(cmd) => {
                 if let Some(chunk) = cmd.get(NEW_TERM_DATA) {
                     let mut new_lines = Vec::new();
-
                     let mut line_iter = chunk.lines();
 
                     // the first new line can be a continuation of the last line.
@@ -236,7 +204,8 @@ impl<W: Widget<TerminalState>> Controller<TerminalState, W> for TerminalControll
 
                     data.last_line = last_line;
                     self.update_last_line(data);
-                    ctx.submit_command(SCROLL_BOTTOM.to(TERMINAL_ID));
+
+                    child.scroll_to_on_axis(Axis::Vertical, child.child_size().height);
                     ctx.set_handled();
                 }
             }
@@ -279,6 +248,7 @@ const BRIGHT_MAGENTA: Color = Color::rgb8(180, 0, 158);
 const BRIGHT_CYAN: Color = Color::rgb8(97, 214, 214);
 /// Bright white.
 const BRIGHT_WHITE: Color = Color::rgb8(242, 242, 242);
+
 /// A parser for terminal sequences that needs to be escaped.
 pub struct AnsiParser {
     /// The current index of the parser.
@@ -414,18 +384,11 @@ impl Perform for AnsiParser {
 
 /// Builds the terminal UI component.
 pub fn terminal_builder() -> impl Widget<AppState> {
-    Flex::column()
-        .with_child(Label::new("cmd"))
-        .with_flex_child(
-            List::new(|| Label::raw().expand_width())
-                .lens(TerminalState::output)
-                .scroll()
-                .vertical()
-                .controller(ScrollController),
-            1.,
-        )
-        .with_spacer(10.)
-        .padding(3.)
+    List::new(|| Label::raw().expand_width())
+        .lens(TerminalState::output)
+        .padding((3., 3., 3., 13.))
+        .scroll()
+        .vertical()
         .controller(TerminalController::new())
         .with_id(TERMINAL_ID)
         .lens(AppState::terminal)

@@ -1,10 +1,9 @@
 //! All the editor logic, from the text editing to the UI rendering.
 
 use crate::{
-    app::AppState,
+    app::{AppState, SINK},
     file_explorer::OPEN_FILE_IN_EDITOR,
     highlight::{HighlightCache, LINES_PER_COMMAND, NEW_HIGHLIGHTING},
-    lsp::{get_lsp_server, LspServer},
     settings::{self, FONT, THEME},
     utils::{LineEnding, ToColor},
     vim::{VimMotionKind, VimWord},
@@ -12,8 +11,9 @@ use crate::{
 use druid::{
     piet::{PietText, Text, TextLayout as PietTextLayout, TextLayoutBuilder},
     text::{Attribute, RichText},
-    Affine, Color, Data, Env, Event, ExtEventSink, FileInfo, FontWeight, Lens, LifeCycle, Point,
-    Rect, RenderContext, Selector, Size, TextAlignment, TextLayout, Widget, WidgetExt, WidgetId,
+    Affine, ArcStr, Color, Data, Env, Event, ExtEventSink, FileInfo, FontWeight, Lens, LifeCycle,
+    Point, Rect, RenderContext, Selector, Size, Target, TextAlignment, TextLayout, Widget,
+    WidgetExt, WidgetId,
 };
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -29,7 +29,7 @@ use syntect::{highlighting::FontStyle, parsing::SyntaxReference};
 use xi_rope::{
     delta,
     engine::{Engine, RevId},
-    tree, LinesMetric, Rope, RopeDelta, RopeInfo,
+    tree, Interval, LinesMetric, Rope, RopeDelta, RopeInfo,
 };
 
 /// The command sent when a directory is open.
@@ -37,6 +37,12 @@ pub const OPEN_DIRECTORY: Selector<FileInfo> = Selector::new("ne2.editor.open_di
 
 /// Command to exit just after saving the file.
 pub const SAVE_FILE_AS_AND_EXIT: Selector<FileInfo> = Selector::new("ne2.editor.save_as_and_exit");
+
+/// Command sent when the document changes and the app should notify the LSP server.
+pub const DID_CHANGE: Selector<DeltaState> = Selector::new("ne2.editor.did_change");
+
+/// Command sent when the document is saved and the app should notify the LSP server.
+pub const DID_SAVE: Selector<()> = Selector::new("ne1.editor.did_save");
 
 /// The id of the editor.
 pub const EDITOR_ID: WidgetId = WidgetId::reserved(1);
@@ -70,9 +76,6 @@ pub struct EditorState {
     pub language: String,
     /// The path of the file being edited. None if the file hasn't been saved to the disk yet.
     pub file: Option<Arc<Path>>,
-    /// The attached LSP server if there is one.
-    #[data(ignore)]
-    pub lsp: Option<Arc<Mutex<LspServer>>>,
 }
 
 /// An indenting style.
@@ -256,7 +259,6 @@ impl EditorState {
             file,
             indent_style,
             line_ending,
-            lsp: None,
             language,
         };
 
@@ -297,15 +299,6 @@ impl EditorState {
         self.first_line() + self.lines_displayed.get()
     }
 
-    /// Downloads the LSP server of the current language if the user asked it.
-    pub fn download_lsp_server(&mut self, release_id: usize, download_url: String) {
-        let lsp_server = self.lsp.as_mut().unwrap();
-        lsp_server
-            .lock()
-            .unwrap()
-            .download(release_id, download_url);
-    }
-
     /// Updates the language.
     pub fn update_language(&mut self) {
         let buffer = self.buffer();
@@ -314,12 +307,6 @@ impl EditorState {
             self.file.as_ref().map(|a| a.to_path_buf()),
             first_line.as_ref(),
         );
-
-        // look for this language LSP.
-        self.lsp = get_lsp_server(&self.language).map(|lsp| {
-            lsp.check_update();
-            Arc::new(Mutex::new(lsp))
-        });
     }
 
     /// Updates the cursor over parameter.
@@ -355,32 +342,35 @@ impl EditorState {
 
     /// Removes the specified range from the buffer while registering the edit in the engine.
     pub fn remove(&mut self, range: Range<usize>) {
-        self.invalidate_cursor();
-        let mut engine = self.engine.lock().unwrap();
-        let rev = engine.get_head_rev_id().token();
-
-        let mut builder = delta::Builder::new(engine.get_head().len());
+        let mut builder = delta::Builder::new(self.buffer().len());
         builder.delete(range);
-        let delta = builder.build();
 
-        engine.edit_rev(0, 0, rev, delta.clone());
-
-        self.delta = DeltaState::new(delta, engine.get_head_rev_id());
+        self.apply_change(builder, "");
     }
 
     /// Edits the specified range of the buffer while registering the edit in the engine.
     pub fn edit(&mut self, range: Range<usize>, text: &str) {
+        let mut builder = delta::Builder::new(self.buffer().len());
+        builder.replace(range, text.into());
+
+        self.apply_change(builder, text);
+    }
+
+    /// Applies the change (an edit or a remove) and notifies the LSP server.
+    fn apply_change(&mut self, builder: delta::Builder<RopeInfo>, text: &str) {
         self.invalidate_cursor();
         let mut engine = self.engine.lock().unwrap();
         let rev = engine.get_head_rev_id().token();
-
-        let mut builder = delta::Builder::new(engine.get_head().len());
-        builder.replace(range, text.into());
         let delta = builder.build();
 
         engine.edit_rev(0, 0, rev, delta.clone());
+        self.delta
+            .next(delta, engine.get_head_rev_id(), Arc::from(text));
 
-        self.delta = DeltaState::new(delta, engine.get_head_rev_id());
+        SINK.get()
+            .unwrap()
+            .submit_command(DID_CHANGE, self.delta.clone(), Target::Auto)
+            .unwrap();
     }
 
     /// Sets the x coordinate of the cursor and updates Cursor::wanted_x if desired.
@@ -753,6 +743,11 @@ impl EditorState {
             buffer.slice_to_cow(..).as_bytes(),
         )
         .expect("Could not write file to disk!");
+
+        SINK.get()
+            .unwrap()
+            .submit_command(DID_SAVE, (), Target::Auto)
+            .unwrap();
     }
 }
 
@@ -762,32 +757,43 @@ impl EditorState {
 pub struct DeltaState {
     /// The delta.
     delta: Option<RopeDelta>,
-    /// The revision using this delta.
+    /// The revision after this delta.
     pub rev: RevId,
+    /// The revision before this delta.
+    pub old_rev: RevId,
+    /// The changed text.
+    pub text: ArcStr,
 }
 
 impl DeltaState {
-    /// Creates a new delta state.
-    pub fn new(delta: RopeDelta, rev: RevId) -> Self {
-        Self {
+    /// Creates a new delta state based on this delta.
+    pub fn next(&mut self, delta: RopeDelta, rev: RevId, text: ArcStr) {
+        *self = Self {
             delta: Some(delta),
             rev,
-        }
+            old_rev: self.rev,
+            text,
+        };
     }
 
     /// Creates a new empty delta state.
     pub fn new_empty(rev: RevId) -> Self {
-        Self { delta: None, rev }
+        Self {
+            delta: None,
+            rev,
+            old_rev: rev,
+            text: Arc::from(""),
+        }
     }
 
-    /// Returns the rope associated to this state.
+    /// Gets the buffer before the change.
     #[inline]
-    pub fn rope(&self, engine: &Arc<Mutex<Engine>>) -> Rope {
+    pub fn old_buffer(&self, engine: &Arc<Mutex<Engine>>) -> Rope {
         engine
             .lock()
             .unwrap()
-            .get_rev(self.rev.token())
-            .unwrap_or_default()
+            .get_rev(self.old_rev.token())
+            .unwrap()
     }
 
     /// Returns the first modified char in this delta.
@@ -798,6 +804,11 @@ impl DeltaState {
             .as_ref()
             .map(|delta| delta.summary().0.start)
             .unwrap_or_default()
+    }
+
+    /// Returns the summary, assuming that the delta isn't None.
+    pub fn summary(&self) -> (Interval, usize) {
+        self.delta.as_ref().unwrap().summary()
     }
 }
 
@@ -1254,7 +1265,7 @@ impl Widget<AppState> for Ne2Editor {
             rc.clip(clip_rect);
 
             let cursor_line = data.editor.cursor.y as isize - data.editor.line_offset as isize;
-            if cursor_line < 0 {
+            if cursor_line < 0 || cursor_line >= data.editor.lines_displayed.get() as isize {
                 return;
             }
 

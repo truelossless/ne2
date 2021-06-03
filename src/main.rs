@@ -1,5 +1,6 @@
-//! Ne2 (pronounced ["neato"](https://www.reddit.com/r/tf2/comments/4njl3p/jill_on_facepunch_the_next_update_is_gonna_be/)) is a lightweight IDE with vim-like motions.
+//! Ne2 (pronounced [neato](https://www.reddit.com/r/tf2/comments/4njl3p/jill_on_facepunch_the_next_update_is_gonna_be/)) is a lightweight IDE with vim-like motions.
 //! It is specifically designed to be performant and handles very well large text files.
+//! test
 
 #![windows_subsystem = "windows"]
 #![deny(clippy::missing_docs_in_private_items)]
@@ -22,9 +23,11 @@ mod file_explorer;
 mod highlight;
 mod lsp;
 mod notification_center;
+mod panel;
 mod settings;
 mod status_bar;
 mod terminal;
+mod tooltip;
 mod utils;
 mod vim;
 
@@ -38,7 +41,7 @@ fn main() {
             env.set(druid::theme::PROGRESS_BAR_RADIUS, 0.);
             env.set(druid::theme::UI_FONT, FONT.clone());
             env.set(
-                druid::theme::LABEL_COLOR,
+                druid::theme::TEXT_COLOR,
                 THEME.settings.foreground.unwrap().to_color(),
             );
         })

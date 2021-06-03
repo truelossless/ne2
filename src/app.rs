@@ -3,26 +3,33 @@
 use std::{
     env, mem,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, Mutex},
 };
-
 use crate::{
     activity_bar::{activity_bar_builder, activity_chooser_builder, ActivityBarState},
-    editor::{editor_builder, EditorState, OPEN_DIRECTORY, SAVE_FILE_AS_AND_EXIT},
+    editor::{
+        editor_builder, EditorState, DID_CHANGE, DID_SAVE, OPEN_DIRECTORY, SAVE_FILE_AS_AND_EXIT,
+    },
     file_explorer::FileNode,
+    lsp::{get_lsp_server, LspServer, LspServerState, LspServerStatus, NEW_LSP_MESSAGE},
     notification_center::{
         NotificationCenterState, NotificationId, ADD_BUTTON_NOTIFICATION, ADD_TEXT_NOTIFICATION,
         UPDATE_PROGRESS_BAR, UPDATE_TEXT,
     },
+    panel::panel_builder,
     status_bar::status_bar_builder,
-    terminal::{terminal_builder, TerminalState},
-    vim::VimState,
+    terminal::TerminalState,
+    vim::{EditMode, VimState},
 };
 use druid::{
     commands::{OPEN_FILE, SAVE_FILE_AS},
+    im::Vector,
     widget::{CrossAxisAlignment, Flex, Split},
     AppDelegate, Application, Data, ExtEventSink, Handled, Lens, Widget, WidgetExt,
 };
+
+
+
 use once_cell::sync::OnceCell;
 
 /// The event sink of the application.
@@ -38,10 +45,19 @@ pub struct AppState {
     pub activity_bar: ActivityBarState,
     /// The editor state.
     pub editor: EditorState,
+    /// The file explorer root.
+    pub file_explorer: FileNode,
+    /// The attached LSP servers, if any.
+    /// For one project, we can have multiple LSP servers,
+    /// one for each programming language.
+    // since the number of lsp servers will be low, we can
+    // store them in a Vector instead of a HashMap, this will
+    // ease operations such as lensing.
+    pub lsp_servers: Vector<LspServerState>,
     /// The notification center state.
     pub notification_center: NotificationCenterState,
     /// The project's root directory.
-    pub project: FileNode,
+    pub project_dir: Arc<Path>,
     /// The terminal state.
     pub terminal: TerminalState,
     /// The vim state.
@@ -67,9 +83,11 @@ impl AppState {
         let file_path = start_path.filter(|path| path.is_file());
 
         Self {
-            project: FileNode::new_loaded_dir(&project_path),
+            project_dir: Arc::from(project_path.as_ref()),
+            file_explorer: FileNode::new_loaded_dir(&project_path),
             activity_bar: ActivityBarState::default(),
             editor: EditorState::new(file_path),
+            lsp_servers: Vector::new(),
             notification_center: NotificationCenterState::default(),
             terminal: TerminalState::default(),
             vim: VimState::default(),
@@ -78,16 +96,60 @@ impl AppState {
 
     /// Opens a file in the editor.
     pub fn open_file(&mut self, path: &Path) {
+        LspServer::did_close(self);
         self.notification_center.clear();
         let old_editor = mem::replace(&mut self.editor, EditorState::new(Some(path.to_owned())));
         self.editor.lines_displayed = old_editor.lines_displayed;
         self.editor.update_language();
+        self.vim.mode = EditMode::Normal;
+        self.add_lsp_server();
+        LspServer::did_open(self);
+    }
+
+    /// Downloads the LSP server of the current language if the user asked it.
+    pub fn download_lsp_server(&mut self, release_id: usize, download_url: String) {
+        let editor_language = self.editor.language.clone();
+        let mut lsp_server = self
+            .lsp_servers
+            .iter_mut()
+            .find(|server| server.language == editor_language)
+            .unwrap()
+            .server
+            .lock()
+            .unwrap();
+        lsp_server.download(release_id, download_url);
+    }
+
+    /// Tries to start a new LSP server corresponding to the language of the current file.
+    /// if there is no server available, or if the server is already started this does nothing.
+    pub fn add_lsp_server(&mut self) {
+        if self
+            .lsp_servers
+            .iter()
+            .any(|server| server.language == self.editor.language)
+        {
+            return;
+        }
+
+        let mut lsp_server = match get_lsp_server(&self.editor.language) {
+            Some(lsp_server) => lsp_server,
+            None => return,
+        };
+
+        lsp_server.check_update();
+        lsp_server.connect(&self.project_dir);
+        self.lsp_servers.push_back(LspServerState {
+            language: self.editor.language.clone(),
+            diagnostics: Vector::new(),
+            status: LspServerStatus::Offline,
+            server: Arc::new(Mutex::new(lsp_server)),
+        });
     }
 }
 
 /// Builds the ne2 UI
 pub fn ui_builder() -> impl Widget<AppState> {
-    let editor_term_split = Split::rows(editor_builder().expand(), terminal_builder())
+    let editor_term_split = Split::rows(editor_builder().expand(), panel_builder())
         .draggable(true)
         .bar_size(0.)
         .split_point(0.7);
@@ -135,7 +197,9 @@ impl AppDelegate<AppState> for Delegate {
 
         if let Some(path) = cmd.get(OPEN_DIRECTORY) {
             data.notification_center.clear();
-            data.project = FileNode::new_loaded_dir(path.path());
+            data.lsp_servers = Vector::new();
+            data.project_dir = Arc::from(path.path());
+            data.file_explorer = FileNode::new_loaded_dir(path.path());
             return Handled::Yes;
         }
 
@@ -143,6 +207,7 @@ impl AppDelegate<AppState> for Delegate {
             data.editor.file = Some(Arc::from(path.path()));
             data.editor.save_to_file();
             data.editor.update_language();
+            data.add_lsp_server();
             return Handled::Yes;
         }
 
@@ -188,6 +253,30 @@ impl AppDelegate<AppState> for Delegate {
             {
                 notif.text = text.clone();
             }
+            return Handled::Yes;
+        }
+
+        // lsp server commands
+        if let Some(language) = cmd.get(NEW_LSP_MESSAGE) {
+            let lsp_arc = data
+                .lsp_servers
+                .iter_mut()
+                .find(|server| server.language == *language)
+                .unwrap()
+                .server
+                .clone();
+            let mut lsp_server = lsp_arc.lock().unwrap();
+            lsp_server.handle_new_message(data);
+            return Handled::Yes;
+        }
+
+        if let Some(delta) = cmd.get(DID_CHANGE) {
+            LspServer::did_change(data, delta);
+            return Handled::Yes;
+        }
+
+        if cmd.is(DID_SAVE) {
+            LspServer::did_save(data);
             return Handled::Yes;
         }
 

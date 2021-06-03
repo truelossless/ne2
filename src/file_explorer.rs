@@ -114,7 +114,6 @@ impl FileNode {
 }
 
 /// Builds the file explorer.
-/// If we don't have any project open, prompt to open a directory.
 pub fn file_explorer_builder() -> impl Widget<AppState> {
     Maybe::new(
         || List::new(tree_builder).lens(DirContents::files),
@@ -122,7 +121,7 @@ pub fn file_explorer_builder() -> impl Widget<AppState> {
     )
     .padding((0., 20., 20., 20.))
     .scroll()
-    .lens(AppState::project.then(FileNode::dir))
+    .lens(AppState::file_explorer.then(FileNode::dir))
 }
 
 /// One level of the file explorer.

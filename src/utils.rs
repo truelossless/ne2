@@ -3,7 +3,7 @@
 use druid::{
     text::TextStorage,
     widget::{Controller, RawLabel, SvgData},
-    Color, Cursor, Data, Modifiers, Widget,
+    Color, Cursor, Data, LifeCycle, Modifiers, Widget,
 };
 
 use crate::settings::THEME;
@@ -94,19 +94,28 @@ impl<T, W: Widget<T>> Controller<T, W> for ButtonController {
 pub struct HighlightController;
 
 impl<T: Data + TextStorage> Controller<T, RawLabel<T>> for HighlightController {
-    fn event(
+    fn lifecycle(
         &mut self,
         child: &mut RawLabel<T>,
-        ctx: &mut druid::EventCtx,
-        _event: &druid::Event,
-        _data: &mut T,
-        _env: &druid::Env,
+        ctx: &mut druid::LifeCycleCtx,
+        event: &druid::LifeCycle,
+        data: &T,
+        env: &druid::Env,
     ) {
-        if ctx.is_hot() {
-            child.set_text_color(THEME.settings.background.unwrap().to_color());
-        } else {
-            child.set_text_color(THEME.settings.foreground.unwrap().to_color());
+        // this often crashes with "TextLayout::draw called without rebuilding layout object"
+        // when scrolling in debug mode. But this doesn't happen in release so we will keep
+        // this like that for now.
+        match event {
+            LifeCycle::HotChanged(true) => {
+                child.set_text_color(THEME.settings.background.unwrap().to_color());
+                ctx.request_layout();
+            }
+            LifeCycle::HotChanged(false) => {
+                child.set_text_color(THEME.settings.foreground.unwrap().to_color());
+                ctx.request_layout();
+            }
+
+            _ => child.lifecycle(ctx, event, data, env),
         }
-        ctx.request_layout();
     }
 }
